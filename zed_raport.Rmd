@@ -1,0 +1,358 @@
+---
+title: "ZED Projekt"
+author: "Marcin Wilczyñski 117215"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    keep_md: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache.lazy = FALSE)
+```
+
+#Wstêp
+
+Najwiêksz¹ przeszkod¹ w analizowanym zbiorze danych by³ jego rozmiar.Od samego wczytywania danych, poprzez proces czyszczenia, a¿ do budowania klasyfikatora nale¿a³o pamiêtaæ o skoñczonej iloœci czasu i pamiêci jak¹ siê dysponuje. Pierwsze próby trenowania klasyfikatorów takich jak kNN czy Random Forest zakoñczy³y siê niepowodzeniem z powodu zbyt d³ugiego czasu wykonania. Aby przyspieszyæ proces najpierw wybra³em prostszy algorytm regresji liniowej i  usun¹³em ze zbioru danych atrybuty o niewielkim odstêpie miêdzykwartylowym, zak³adaj¹c ¿e niewiele wnios¹ do klasyfikacji czy regresji. Nastêpnie zacz¹³em usuwaæ po jednym atrybucie z ka¿dej pary atrybutów mocno skorelowanych. W ten sposób ograniczy³em zbiór danych do 8 atrybutów i 3 etykiet. Pozwoli³o to wykorzystaæ algorytm Random Forest do klasyfikacji, a tak¿e bardzo szybko liczyæ regresjê liniow¹. Niestety jakoœæ modeli, który powsta³ w ten sposób pozostawia wiele do ¿yczenia. Próba przybli¿enia liczby elektronów czy atomów skoñczy³a siê utworzeniem modelu o doœæ niskim wspó³czynniku R^2 (ok. 0.43), co mo¿e wskazywaæ na nieliniowoœæ tego zjawiska lub b³êdny proces oczyszczania danych.
+Jeszcze gorzej zakoñczy³a siê próba przypisania danej obserwacji do odpowiadaj¹cej cz¹steczki. Dok³adnoœæ wynios³a jedynie ok. 27%. Podj¹³em dodatkowo próbê zbudowania klasyfikatora, który na wejœciu bêdzie przyjmowa³ 
+wyjœcie ze zbudowanych wczeœniej przeze mnie modeli okreœlaj¹cych liczbê atomów i elektronów. Niestety ta próba zakoñczy³a siê poprawnym sklasyfikowaniem jedynie 16% przyk³adów.
+ 
+ 
+# Wczytanie i wstêpne przetwarzanie danych
+
+## Wykorzystywanie biblioteki
+
+```{r loading libraries, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(scales)
+library(plotly)
+library(knitr)
+library(kableExtra)
+
+```
+
+## Zapewnienie powtarzalnoœci analizy
+
+```{r}
+set.seed(23)
+```
+
+## Wczytwanie danych z pliku
+
+```{r loading data from file, cache=TRUE}
+knownClasses <- c("title"="character", "blob_coverage"="character", "res_coverage"="character", "skeleton_data"="character")
+initial <- read.csv(file="C:/Users/wilcz/OneDrive/Pulpit/all_summary/all_summary.csv", header=TRUE, sep=";", nrows = 75000, colClasses=knownClasses)
+classes <- sapply(initial, class)
+rm(initial)
+All_Data <- read.csv(file="C:/Users/wilcz/OneDrive/Pulpit/all_summary/all_summary.csv", header=TRUE, sep=";",colClasses = classes)
+```
+
+## Usuwanie nieporz¹danych res_name
+
+```{r removing unnecessary res_name, cache=FALSE}
+res_names_to_drop <- c("UNK", "UNX", "UNL", "DUM", "N", "BLOB", "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET", "MSE", "PHE", "PRO", "SEC", "SER", "THR", "TRP", "TYR", "VAL", "DA", "DG", "DT", "DC", "DU", "A", "G", "T", "C", "U", "HOH", "H20", "WAT")
+All_Data <- All_Data %>% filter(!(res_name %in% res_names_to_drop) )
+```
+
+## Uzupe³nianie brakuj¹cych wartoœci
+
+```{r filling missing values, cache=FALSE}
+has_conflicted_res_name <- function(observation) { 
+  !is.na(observation$res_name) & observation$name_from_title != as.character(observation$res_name) 
+}
+
+tmp_name <- All_Data[, c("title","res_name")]
+tmp_name$name_from_title <- sapply(tmp_name$title, function(x) { strsplit(x," ")[[1]][2] })
+kable(tmp_name[has_conflicted_res_name(tmp_name),])  %>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px") #sprawdzenie czy gdzieœ wystêpuj¹ niespójnoœci w nazwach
+#nie wystêpuj¹, wiêc mo¿emy nadpisaæ kolumnê res_name wartoœciami z tytulu
+kable(head(tmp_name[is.na(tmp_name$res_name),]))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px") # ZONK sód (NA) jest traktowany jako wartoœæ pusta! takich wartoœci jest 10K
+levels(tmp_name$res_name) <- c( levels(tmp_name$res_name), "NA")
+tmp_name[is.na(tmp_name$res_name) & tmp_name$name_from_title == "NA","res_name"] <- "NA"
+kable(summary(All_Data$res_name))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px") #9.6k NAs
+All_Data$res_name <- tmp_name$res_name
+kable(summary(All_Data$res_name))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px") # 0 NAs - victory!
+rm(tmp_name)
+```
+
+## Rozmiar zbioru i podstawowe statystyki.
+```{r summary of the dataset, cache=FALSE}
+kable(dim(All_Data))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+kable(summary(All_Data))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+```
+# Dalsze przetwarzanie i analiza danych
+
+## Ograniczenie liczby klas (res_name) do 50 najpopularniejszych wartoœci
+
+```{r get most frequent res_name values, cache=FALSE}
+top50 <- All_Data %>% group_by(res_name) %>% summarise(n = n()) %>% arrange(desc(n)) %>% head(50)
+top50 <- as.array(top50$res_name)
+kable(top50)%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+All_Data <- All_Data %>% filter(res_name %in% top50)
+```
+
+## Liczba przyk³adów
+
+```{r get res_name classes cardinality, cache=FALSE}
+examples <- All_Data %>% group_by(res_name) %>% summarise(n = n()) %>% arrange(desc(n))
+kable(examples)%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+```
+
+## Wykresy rozk³adów liczby atomów (local_res_atom_non_h_count) i elektronów (local_res_atom_non_h_electron_sum)
+
+```{r show histograms for local_res_atom_non_h_count and local_res_atom_non_h_electron_sum, cache=FALSE}
+ggplot(All_Data, aes(local_res_atom_non_h_count)) + geom_histogram(binwidth = 1)
+ggplot(All_Data, aes(local_res_atom_non_h_electron_sum)) + geom_histogram(binwidth = 1)
+```
+
+## 10 klas z najwiêksz¹ niezgodnoœci¹ liczby atomów
+
+```{r atom inconsistences, cache=FALSE}
+atom_count_diff <-  All_Data %>% 
+  mutate(diff = abs(local_res_atom_non_h_count - dict_atom_non_h_count)) %>% 
+  group_by(res_name) %>% 
+  summarise(mean_diff = mean(diff), sd_diff = sd(diff), min_diff = min(diff), max_diff = max(diff), n=n(), n_diff = sum(diff>0)) %>% 
+  mutate(percent_diff = n_diff/n * 100) %>% 
+  select(res_name, percent_diff) %>% 
+  arrange(desc(percent_diff)) %>% 
+  head(10) %>% 
+  transmute(res_name, percent_diff = round(percent_diff, 2))
+
+kable(atom_count_diff)%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+```
+
+## 10 klas z najwiêksz¹ niezgodnoœci¹ liczby elektronów
+
+```{r electron inconsistences, cache=FALSE}
+electron_count_diff <- All_Data %>% 
+  mutate(diff = abs(local_res_atom_non_h_electron_sum - dict_atom_non_h_electron_sum)) %>% 
+  group_by(res_name) %>% 
+  summarise(mean_diff = mean(diff), sd_diff = sd(diff), min_diff = min(diff), max_diff = max(diff), n=n(), n_diff = sum(diff>0)) %>% 
+  mutate(percent_diff = n_diff/n * 100) %>% 
+  select(res_name, percent_diff) %>% 
+  arrange(desc(percent_diff)) %>% 
+  head(10) %>% 
+  transmute(res_name, percent_diff = round(percent_diff, 2))
+
+kable(electron_count_diff)%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+```
+
+## Prezentacja niezgodnoœci liczby elektronów
+
+```{r inconsistences plots electrons}
+plot_ly(All_Data, x = ~local_res_atom_non_h_electron_sum, y = ~dict_atom_non_h_electron_sum, type="scattergl", mode="markers")
+```
+
+## Prezentacja niezgodnoœci liczby atomów
+
+```{r inconsistences plots atoms}
+plot_ly(All_Data, x = ~local_res_atom_non_h_count, y = ~dict_atom_non_h_count, type="scattergl", mode="markers")
+```
+
+## Rozk³ad wartoœci wszystkich kolumn zaczynaj¹cych siê od part_01
+
+```{r part_01 histograms, cache=FALSE, fig.height=40, fig.width=12}
+
+columns_part01 <- colnames(All_Data)
+columns_part01 <- columns_part01[startsWith(columns_part01, "part_01")]
+columns_part01 <- head(columns_part01, 10)
+columns_part01_all_data <- All_Data %>% select(columns_part01)
+
+data_gathered <- gather(columns_part01_all_data)
+data_gathered_means <- data_gathered %>% group_by(key) %>% summarise(mean.value = mean(value, na.rm = TRUE))
+ggplot(data_gathered, aes(value)) + 
+  geom_histogram(bins = 10)  +
+  facet_wrap(~key, scales = 'free_x',ncol = 2) + 
+  geom_vline(data = data_gathered_means,aes(xintercept = mean.value), color="red", linetype="dashed", size=1) +
+  geom_text(data = data_gathered_means, aes(label=round(mean.value,2) ,y=0,x=mean.value), vjust=-1,col='orange',size=5)
+
+```
+
+
+# Przygotowanie danych do regresji i klasyfikacji
+
+```{r final data preparation}
+manipulation_data <- All_Data
+columns_to_predict <- colnames(manipulation_data)
+columns_to_predict <- columns_to_predict[startsWith(columns_to_predict, "part_")]
+manipulation_data <- manipulation_data %>% select(columns_to_predict)
+numeric_data <- sapply(manipulation_data, class)
+numeric_data <- numeric_data == "numeric" | numeric_data == "integer"
+numeric_data <- manipulation_data[, numeric_data]
+label_attributes <- c("local_res_atom_non_h_count", "local_res_atom_non_h_electron_sum", "res_name")
+numeric_data[label_attributes] <- All_Data[label_attributes]
+numeric_data <- numeric_data[complete.cases(numeric_data), ]
+label_store <- numeric_data %>% select(label_attributes)
+numeric_data <- numeric_data %>% select(-label_attributes)
+
+q <- sapply(numeric_data, quantile, c(.05, .95) )
+numeric_data <- as.data.frame(sapply(numeric_data, squish, q))
+
+numeric_data <- numeric_data[ ,sapply(numeric_data, function(x) sd(quantile(x,c(.25, .75))) ) >0.1]
+tmp <- cor(numeric_data)
+#show cors
+tmp2 <- tmp
+tmp2[upper.tri(tmp2)] <- NA
+diag(tmp2) <- NA
+best_cor <- as.data.frame(as.table(tmp2)) %>% filter(!is.na(Freq)) %>% arrange(desc(abs(Freq))) %>% head(3)
+for(d in c(1,2,3)) {
+  data_x_column <- as.character( best_cor[d,"Var1"])
+  data_y_column <- as.character( best_cor[d,"Var2"])
+  #print(paste(data_x_column,data_y_column))
+  print(qplot(x=numeric_data[,data_x_column], y=numeric_data[,data_y_column]))
+}
+worst_cor <- as.data.frame(as.table(tmp2)) %>% filter(!is.na(Freq)) %>% arrange(desc(abs(Freq))) %>% tail(3)
+for(d in c(1,2,3)) {
+  data_x_column <- as.character( worst_cor[d,"Var1"])
+  data_y_column <- as.character( worst_cor[d,"Var2"])
+  print(qplot(x=numeric_data[,data_x_column], y=numeric_data[,data_y_column]))
+}
+
+tmp[upper.tri(tmp)] <- 0
+diag(tmp) <- 0
+cols_to_drop <- apply(tmp,2,function(x) any(abs(x) > 0.85))
+data.new <- numeric_data[,!cols_to_drop]
+data.new[label_attributes] <- label_store[label_attributes]
+kable(summary(data.new))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+```
+
+# Przewidywanie liczby atomów
+
+```{r atom number prediction}
+
+
+
+columns_part_all_data_predict <- data.new %>% select(-c("local_res_atom_non_h_electron_sum", "res_name"))
+
+inTraining <- 
+  createDataPartition(
+    y = columns_part_all_data_predict$local_res_atom_non_h_count,
+    p = .75,
+    list = FALSE)
+
+training <- columns_part_all_data_predict[ inTraining,]
+testing  <- columns_part_all_data_predict[-inTraining,]
+
+ctrl <- trainControl(method = "none")
+
+fit_atom <- train(local_res_atom_non_h_count ~ .,
+     data = training,
+     method = "lm",
+     trControl = ctrl)
+
+rfClasses <- predict(fit_atom, newdata = testing)
+kable(postResample(rfClasses,testing$local_res_atom_non_h_count ))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+
+```
+
+# Przewidywanie liczby elektronów
+
+```{r electron number prediction}
+
+columns_part_all_data_predict <- data.new %>% select(-c("local_res_atom_non_h_count", "res_name"))
+
+inTraining <- 
+  createDataPartition(
+    y = columns_part_all_data_predict$local_res_atom_non_h_electron_sum,
+    p = .75,
+    list = FALSE)
+
+training <- columns_part_all_data_predict[ inTraining,]
+testing  <- columns_part_all_data_predict[-inTraining,]
+
+ctrl <- trainControl(method = "none")
+
+fit_electron <- train(local_res_atom_non_h_electron_sum ~ .,
+     data = training,
+     method = "lm",
+     trControl = ctrl)
+
+rfClasses <- predict(fit_electron, newdata = testing)
+kable(postResample(rfClasses,testing$local_res_atom_non_h_electron_sum ))%>%
+  kable_styling() %>%
+  scroll_box(width = "100%", height = "600px")
+
+```
+
+# Przewidywanie atrybutu res_name
+```{r res_name prediction}
+columns_part_all_data_predict <- data.new %>% select(-c("local_res_atom_non_h_count", "local_res_atom_non_h_electron_sum"))
+columns_part_all_data_predict$res_name <- droplevels(columns_part_all_data_predict$res_name)
+inTraining <- 
+  createDataPartition(
+    y = columns_part_all_data_predict$res_name,
+    p = .75,
+    list = FALSE)
+
+training <- columns_part_all_data_predict[ inTraining,]
+testing  <- columns_part_all_data_predict[-inTraining,]
+
+ctrl <- trainControl(method = "none")
+
+fit <- train(res_name ~ .,
+     data = training,
+     method = "rf",
+     trControl = ctrl,
+     ntree = 4)
+
+rfClasses <- predict(fit, newdata = testing)
+print(confusionMatrix(rfClasses,testing$res_name )$overall['Accuracy'] )
+```
+
+```{r res_name prediction alternative}
+columns_part_all_data_predict <- data.new %>% select(-c("local_res_atom_non_h_count", "local_res_atom_non_h_electron_sum"))
+columns_part_all_data_predict$res_name <- droplevels(columns_part_all_data_predict$res_name)
+
+predicted_electrons <- predict(fit_electron, newdata = columns_part_all_data_predict %>% select(-c( "res_name")))
+predicted_atoms <- predict(fit_atom, newdata = columns_part_all_data_predict %>% select(-c("res_name")))
+
+columns_part_all_data_predict <- data.frame(res_name = columns_part_all_data_predict$res_name, electrons = predicted_electrons, atoms = predicted_atoms)
+
+inTraining <- 
+  createDataPartition(
+    y = columns_part_all_data_predict$res_name,
+    p = .75,
+    list = FALSE)
+
+training <- columns_part_all_data_predict[ inTraining,]
+testing  <- columns_part_all_data_predict[-inTraining,]
+
+ctrl <- trainControl(method = "none")
+
+fit <- train(res_name ~ .,
+     data = training,
+     method = "rf",
+     trControl = ctrl,
+     ntree = 4)
+
+rfClasses <- predict(fit, newdata = testing)
+print(confusionMatrix(rfClasses,testing$res_name )$overall['Accuracy'])
+```
